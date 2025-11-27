@@ -2,6 +2,10 @@
 
 import json
 import os
+import jwt
+import datetime
+
+SECRET_KEY = "your-secret-key"  # Will be used to sign JWT tokens
 
 class User:
     """Base class for users with different roles"""
@@ -30,6 +34,9 @@ class Employee:
         self.name = name
         self.position = position
         self.department = department
+        self.status = 'pending'  # New attribute: approval status
+        self.manager_approver = None
+        self.admin_approver = None
         
     def to_dict(self):
         """Convert employee object to dictionary for JSON serialization"""
@@ -37,18 +44,25 @@ class Employee:
             'id': self.id,
             'name': self.name,
             'position': self.position,
-            'department': self.department
+            'department': self.department,
+            'status': self.status,
+            'manager_approver': self.manager_approver,
+            'admin_approver': self.admin_approver
         }
         
     @staticmethod
     def from_dict(data):
         """Create Employee object from dictionary"""
-        return Employee(
+        emp = Employee(
             id=data['id'],
             name=data['name'],
             position=data['position'],
             department=data['department']
         )
+        emp.status = data.get('status', 'pending')
+        emp.manager_approver = data.get('manager_approver')
+        emp.admin_approver = data.get('admin_approver')
+        return emp
         
 
 class SecurityController:
@@ -91,6 +105,15 @@ class SecurityController:
                         password=password,
                         role=user_data['role']
                     )
+                
+                # Generate JWT token
+                payload = {
+                    'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1),
+                    'username': username,
+                    'role': user_data['role']
+                }
+                token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+                print(f"JWT Token: {token}")
                 return True
         return False
     
@@ -197,20 +220,95 @@ class SecurityController:
         self.employees.remove(employee)
         self.save_employees()
         return True
+        
+    def approve_employee_by_manager(self, employee_id):
+        """Manager approves an employee"""
+        if not self.current_user or self.current_user.role != 'manager':
+            raise PermissionError("Only managers can approve employees")
+            
+        employee = self.read_employee(employee_id)
+        if not employee:
+            raise ValueError("Employee not found")
+            
+        if employee.status != 'pending':
+            raise ValueError("Employee is not pending approval")
+            
+        employee.status = 'manager_approved'
+        employee.manager_approver = self.current_user.username
+        self.save_employees()
+        return employee
+        
+    def approve_employee_by_admin(self, employee_id):
+        """Admin gives final approval to an employee"""
+        if not self.current_user or self.current_user.role != 'admin':
+            raise PermissionError("Only admins can give final approval")
+            
+        employee = self.read_employee(employee_id)
+        if not employee:
+            raise ValueError("Employee not found")
+            
+        if employee.status != 'manager_approved':
+            raise ValueError("Employee needs manager approval first")
+            
+        employee.status = 'approved'
+        employee.admin_approver = self.current_user.username
+        self.save_employees()
+        return employee
 
 
 # Example usage
 if __name__ == "__main__":
     controller = SecurityController()
+    if controller.authenticate('admin', 'admin123'):
+        controller.create_employee("Paul Mccartney","DE","IT")
     
-    # Authentication example
+    print("=== Testing Employee Approval Process ===")
+    
+    # Step 1: Create a new employee (should be in 'pending' state)
     if controller.authenticate('admin', 'admin123'):
         print("Authenticated as admin")
-        # Example create employee
         try:
             new_emp = controller.create_employee("John Doe", "Developer", "IT")
-            print(f"Created employee: {new_emp.name}")
+            print(f"Created employee: {new_emp.name} (ID: {new_emp.id}, Status: {new_emp.status})")
         except Exception as e:
-            print(f"Error: {str(e)}")
+            print(f"Error creating employee: {str(e)}")
+        controller.current_user = None  # Logout admin
     else:
-        print("Authentication failed")
+        print("Admin authentication failed")
+        
+    # Step 2: Manager approves the employee
+    if controller.authenticate('manager', 'manager123'):
+        print("Authenticated as manager")
+        try:
+            # Find the pending employee
+            employees = controller.read_employees()
+            pending_emp = next((e for e in employees if e.status == 'pending'), None)
+            
+            if pending_emp:
+                approved_emp = controller.approve_employee_by_manager(pending_emp.id)
+                print(f"Manager approved employee: {approved_emp.name} (ID: {approved_emp.id}, Status: {approved_emp.status})")
+            else:
+                print("No pending employees found for approval")
+        except Exception as e:
+            print(f"Error in manager approval: {str(e)}")
+        controller.current_user = None  # Logout manager
+    else:
+        print("Manager authentication failed")
+        
+    # Step 3: Admin gives final approval
+    if controller.authenticate('admin', 'admin123'):
+        print("Authenticated as admin for final approval")
+        try:
+            # Find the manager-approved employee
+            employees = controller.read_employees()
+            manager_approved_emp = next((e for e in employees if e.status == 'manager_approved'), None)
+            
+            if manager_approved_emp:
+                final_approved_emp = controller.approve_employee_by_admin(manager_approved_emp.id)
+                print(f"Admin final approved employee: {final_approved_emp.name} (ID: {final_approved_emp.id}, Status: {final_approved_emp.status})")
+            else:
+                print("No manager-approved employees found for final approval")
+        except Exception as e:
+            print(f"Error in admin final approval: {str(e)}")
+    else:
+        print("Admin authentication failed for final approval")
